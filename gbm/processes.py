@@ -120,3 +120,127 @@ class GBM:
             out.append(W)
 
         return out[0] if len(out) == 1 else tuple(out)
+
+
+
+#######################################################################
+########################### HESTON MODEL ##############################
+#######################################################################
+
+import numpy as np
+from typing import Optional, Union, Tuple
+
+Number = Union[int, float]
+
+
+class Heston:
+    """
+    Simple Heston simulator on [0, 1] using an SDE discretization.
+
+    Risk-neutral-style form (but you can interpret mu as any drift):
+        dS_t = mu * S_t dt + sqrt(v_t) * S_t dW1_t
+        dv_t = kappa*(theta - v_t) dt + xi*sqrt(v_t) dW2_t
+        corr(dW1, dW2) = rho
+
+    Discretization (simple and robust):
+      - Variance: "full truncation Euler"
+            v_{k+1} = v_k + kappa*(theta - max(v_k,0))*dt + xi*sqrt(max(v_k,0))*dW2
+            then truncate: v_{k+1} = max(v_{k+1}, 0)
+      - Price: log-Euler using v_k^+ on the step
+            S_{k+1} = S_k * exp((mu - 0.5*v_k^+)*dt + sqrt(v_k^+)*dW1)
+
+    Notes:
+      - No closed-form path (unlike GBM), so this is an approximation.
+      - Full truncation helps keep v nonnegative.
+    """
+
+    def __init__(
+        self,
+        delta_t: Number = 0,
+        N_steps: int = 0,
+        mu: Number = 0.0,
+        kappa: Number = 1.0,
+        theta: Number = 0.04,
+        xi: Number = 0.5,
+        rho: Number = -0.7,
+        s0: Number = 1.0,
+        v0: Number = 0.04,
+    ):
+        self.mu = float(mu)
+        self.kappa = float(kappa)
+        self.theta = float(theta)
+        self.xi = float(xi)
+        self.rho = float(rho)
+        self.s0 = float(s0)
+        self.v0 = float(v0)
+
+        # Determine dt and number of steps for interval [0, 1]
+        if delta_t and delta_t > 0:
+            self.delta_t = float(delta_t)
+            self.N_steps = int(round(1.0 / self.delta_t))
+            self.delta_t = 1.0 / self.N_steps
+        elif N_steps and N_steps > 0:
+            self.N_steps = int(N_steps)
+            self.delta_t = 1.0 / self.N_steps
+        else:
+            raise ValueError("Provide either delta_t > 0 or N_steps > 0.")
+
+        if self.s0 <= 0:
+            raise ValueError("s0 must be > 0.")
+        if self.v0 < 0:
+            raise ValueError("v0 must be >= 0.")
+        if not (-1.0 <= self.rho <= 1.0):
+            raise ValueError("rho must be in [-1, 1].")
+        if self.kappa < 0 or self.theta < 0 or self.xi < 0:
+            raise ValueError("kappa, theta, xi must be >= 0.")
+
+    def build_path(
+        self,
+        seed: Optional[int] = None,
+        return_times: bool = True,
+    ) -> Union[np.ndarray, Tuple[np.ndarray, ...]]:
+        """
+        Build a Heston path on [0,1].
+
+        Returns:
+          - by default: (t, S, v) where arrays have length N_steps+1
+          - if return_times=False: (S, v)
+        """
+        rng = np.random.default_rng(seed)
+
+        dt = self.delta_t
+        n = self.N_steps
+
+        # Time grid
+        t = np.linspace(0.0, 1.0, n + 1)
+
+        # Correlated Brownian increments
+        Z1 = rng.standard_normal(n)
+        Z2 = rng.standard_normal(n)
+        dW1 = np.sqrt(dt) * Z1
+        dW2 = np.sqrt(dt) * (self.rho * Z1 + np.sqrt(1.0 - self.rho**2) * Z2)
+
+        # Allocate paths
+        S = np.empty(n + 1, dtype=float)
+        v = np.empty(n + 1, dtype=float)
+        S[0] = self.s0
+        v[0] = self.v0
+
+        for k in range(n):
+            v_pos = max(v[k], 0.0)
+
+            # variance: full truncation Euler
+            v_next = (
+                v[k]
+                + self.kappa * (self.theta - v_pos) * dt
+                + self.xi * np.sqrt(v_pos) * dW2[k]
+            )
+            v[k + 1] = max(v_next, 0.0)
+
+            # price: log-Euler with v_pos (or use 0.5*(v_pos + max(v[k+1],0)) if you want)
+            S[k + 1] = S[k] * np.exp((self.mu - 0.5 * v_pos) * dt + np.sqrt(v_pos) * dW1[k])
+
+        if return_times:
+            return t, S, v
+        return S, v
+
